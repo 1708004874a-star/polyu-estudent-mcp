@@ -19,7 +19,7 @@ Everything runs on your machine. Your NetID and password never leave it.
 ## Setup
 
 ```bash
-cd ~/Desktop/estudent-mcp
+cd ~/Desktop/Entertain_Apps/estudent-mcp
 uv venv --python 3.12
 uv pip install -e ".[dev]"
 .venv/bin/python -m playwright install chromium
@@ -36,7 +36,7 @@ Run the tests:
 ## Register with Claude Code
 
 ```bash
-claude mcp add estudent -- /Users/longyuhan/Desktop/estudent-mcp/.venv/bin/python -m estudent_mcp.server
+claude mcp add estudent -s user -- /Users/longyuhan/Desktop/Entertain_Apps/estudent-mcp/.venv/bin/python -m estudent_mcp.server
 ```
 
 Then in Claude Code you'll have these tools:
