@@ -99,16 +99,39 @@ async def get_exam_schedule(term: Optional[str] = None) -> dict:
 
 
 @mcp.tool()
-async def search_subjects(query: str, term: Optional[str] = None) -> dict:
-    """Search subject offerings by code or keyword.
+async def search_subjects(
+    query: Optional[str] = None,
+    term: Optional[str] = None,
+    department: Optional[str] = None,
+    program: Optional[str] = None,
+) -> dict:
+    """Search subject offerings, two modes (eStudent Subject Search page).
 
-    `query`: a subject code ("COMP1011") or a title keyword. `term`: an academic
-    year/semester label like "2025/26 Semester 1" (defaults to the most recent
-    offered term). When the query resolves to exactly one subject, its teaching
-    groups with per-group vacancy are included; broad searches return
+    By subject (default): pass `query` — a subject code ("COMP1011") or a title
+    keyword. By programme: pass `department` (a hosting-dept code/name like
+    "COMP") AND `program` (a programme code/name substring like "61425" or
+    "BA (HONS) COMPUTING"); `query` is ignored in this mode.
+
+    `term`: an academic year/semester label like "2025/26 Semester 1" (by
+    subject defaults to trying each offered term; by programme defaults to the
+    most recent). When a search resolves to exactly one subject, its teaching
+    groups with per-group vacancy are included; broader searches return
     subject-level results only.
     """
-    return await _safe(_get_backend().search_subjects(query, term))
+    backend = _get_backend()
+    if department or program:
+        if not (department and program):
+            return {
+                "error": "bad_args",
+                "message": "By-programme search needs BOTH department and program.",
+            }
+        return await _safe(backend.search_subjects_by_program(department, program, term))
+    if not query:
+        return {
+            "error": "bad_args",
+            "message": "Provide `query` (by subject) or `department`+`program`.",
+        }
+    return await _safe(backend.search_subjects(query, term))
 
 
 # --- registration (two-step confirmation) ----------------------------------

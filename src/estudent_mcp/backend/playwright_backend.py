@@ -60,9 +60,13 @@ SEL_GRADES_GO = "#mainForm\\:goBtn"
 
 # Subject-search page controls.
 SEL_SEARCH_BY_SUBJECT = "#mainForm\\:bySubject"
+SEL_SEARCH_BY_PROGRAMME = "#mainForm\\:byProgramme"
 SEL_SEARCH_YEARSEM = "#mainForm\\:yearsem"
 SEL_SEARCH_SUBJCODE = "#mainForm\\:subjCode"
 SEL_SEARCH_SUBJTITLE = "#mainForm\\:subjTitle"
+# By-programme cascade: pick a hosting department, which AJAX-fills progId.
+SEL_SEARCH_PROG_DEPT = "#mainForm\\:progOrgUnitId"
+SEL_SEARCH_PROG_ID = "#mainForm\\:progId"
 SEL_SEARCH_BTN = "#mainForm\\:searchBtn"
 SEL_SEARCH_TABLE = "table[id$=searchTable]"
 # First subject-code drill-in link in the result table.
@@ -350,6 +354,54 @@ class PlaywrightBackend(EStudentBackend):
             await self._page.wait_for_timeout(2000)
         return [seen[c] for c in order]
 
+    async def _attach_groups_if_single(
+        self, offerings: list[SubjectOffering]
+    ) -> None:
+        """When exactly one subject matched, drill in to populate its groups."""
+        if len(offerings) != 1:
+            return
+        try:
+            await self._page.click(SEL_SEARCH_FIRST_CODE)
+            await self._page.wait_for_timeout(3000)
+            detail = parse_subject_detail(await self._page.content())
+            if detail.subject_code == offerings[0].subject_code:
+                offerings[0].groups = detail.groups
+        except Exception:
+            pass  # keep subject-level result if drill-in fails
+
+    async def _select_option_containing(
+        self, selector: str, needle: str, what: str
+    ) -> str:
+        """Select the <option> whose label matches `needle`, returning that label.
+
+        Prefers a bracketed code match ("[COMP]") then exact, then unique
+        substring. Raises PageStructureError on no/ambiguous match so the caller
+        can narrow down rather than silently picking the wrong programme.
+        """
+        opts = await self._page.eval_on_selector_all(
+            f"{selector} option", "els => els.map(o => o.text.trim())"
+        )
+        real = [o for o in opts if o and "Please Select" not in o]
+        n = needle.strip()
+        nl = n.lower()
+        bracket = f"[{n.upper()}]"
+        matches = [o for o in real if bracket in o.upper()]
+        if not matches:
+            matches = [o for o in real if o.lower() == nl]
+        if not matches:
+            matches = [o for o in real if nl in o.lower()]
+        if not matches:
+            raise PageStructureError(
+                f"No {what} matches {needle!r}. e.g. available: {real[:6]}"
+            )
+        if len(matches) > 1:
+            raise PageStructureError(
+                f"{what} {needle!r} is ambiguous ({len(matches)} matches): "
+                f"{matches[:8]} — please be more specific."
+            )
+        await self._page.select_option(selector, label=matches[0])
+        return matches[0]
+
     async def search_subjects(
         self, query: str, term: Optional[str] = None
     ) -> list[SubjectOffering]:
@@ -360,16 +412,47 @@ class PlaywrightBackend(EStudentBackend):
         except Exception as exc:
             shot = await self._screenshot("subject-search")
             raise PageStructureError(f"Subject search failed: {exc}", screenshot=shot)
-        # If exactly one subject matched, drill in so the caller gets vacancy too.
-        if len(offerings) == 1:
-            try:
-                await self._page.click(SEL_SEARCH_FIRST_CODE)
-                await self._page.wait_for_timeout(3000)
-                detail = parse_subject_detail(await self._page.content())
-                if detail.subject_code == offerings[0].subject_code:
-                    offerings[0].groups = detail.groups
-            except Exception:
-                pass  # keep subject-level result if drill-in fails
+        await self._attach_groups_if_single(offerings)
+        return offerings
+
+    async def search_subjects_by_program(
+        self, department: str, program: str, term: Optional[str] = None
+    ) -> list[SubjectOffering]:
+        """By-programme search: select a hosting department (which AJAX-fills the
+        programme list), pick the programme, then search. Returns the same
+        subject-level grid as by-subject (with single-match drill-in)."""
+        await self.login()
+        try:
+            await self._open_search()
+            await self._page.check(SEL_SEARCH_BY_PROGRAMME)
+            await self._page.wait_for_timeout(600)
+            dept_label = await self._select_option_containing(
+                SEL_SEARCH_PROG_DEPT, department, "department"
+            )
+            # Wait for the AJAX cascade to fill the programme dropdown.
+            await self._page.wait_for_timeout(2500)
+            await self._select_option_containing(
+                SEL_SEARCH_PROG_ID, program, "programme"
+            )
+            await self._page.wait_for_timeout(600)
+            if term:
+                await self._page.select_option(SEL_SEARCH_YEARSEM, label=term)
+            else:
+                await self._page.select_option(SEL_SEARCH_YEARSEM, index=1)
+            await self._page.wait_for_timeout(600)
+            await self._page.click(SEL_SEARCH_BTN)
+            await self._page.wait_for_timeout(3500)
+            offerings = await self._collect_search_results()
+        except PageStructureError:
+            raise
+        except Exception as exc:
+            shot = await self._screenshot("by-program-search")
+            raise PageStructureError(
+                f"By-programme search failed (dept={department!r}, "
+                f"program={program!r}): {exc}",
+                screenshot=shot,
+            )
+        await self._attach_groups_if_single(offerings)
         return offerings
 
     async def get_subject_groups(

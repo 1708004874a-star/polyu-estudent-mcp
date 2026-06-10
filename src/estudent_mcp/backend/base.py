@@ -53,6 +53,14 @@ class EStudentBackend(ABC):
         result is subject-level only."""
 
     @abstractmethod
+    async def search_subjects_by_program(
+        self, department: str, program: str, term: str | None = None
+    ) -> list[SubjectOffering]:
+        """Search offerings by programme: a hosting `department` (e.g. "COMP")
+        selects the programme list, then `program` (a code/name substring) picks
+        the programme. Same subject-level result as search_subjects."""
+
+    @abstractmethod
     async def get_subject_groups(
         self, subject_code: str, term: str | None = None
     ) -> SubjectOffering:
