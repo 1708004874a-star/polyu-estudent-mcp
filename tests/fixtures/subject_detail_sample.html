@@ -1,0 +1,24 @@
+<!-- Mirrors the live subject-search-details.jsf: a leading details-table of
+     label/value rows, then the group/vacancy grid table[id$=groupTable].
+     Vacancies column: "5" open, "(4)" reserved/held, "W=.. Top-up vac=.." waitlist.
+     Data is fake. -->
+<html><body>
+<table class="details-table">
+  <tr><th>Subject Code</th><td>COMP1011 [Synopsis for 2025/26 Semester 1 and onwards]</td></tr>
+  <tr><th>Subject Title</th><td>PROGRAMMING FUNDAMENTALS</td></tr>
+  <tr><th>Offering Department</th><td>DEPARTMENT OF COMPUTING</td></tr>
+  <tr><th>Category</th><td></td></tr>
+  <tr><th>Credit(s)</th><td>3.0</td></tr>
+  <tr><th>Level</th><td>1</td></tr>
+</table>
+<table class="details-table data-block">
+  <tr><th>Pre-requisite(s)</th><td></td></tr>
+</table>
+<table class="dr-table rich-table" id="mainForm:groupTable">
+  <tr><th>Subject Group</th><th>Students of these programmes are eligible for taking this subject group</th><th>Group Type</th><th>Group Size</th><th>Vacancies*</th><th>Waitlist available if no vacancy</th></tr>
+  <tr><td>1001</td><td>61435-FCS 61435-FIS</td><td>Restricted PS</td><td>40</td><td>5</td><td>Yes</td></tr>
+  <tr><td>1002</td><td>61435-FCS</td><td>Restricted PS</td><td>40</td><td>(4)</td><td>Yes</td></tr>
+  <tr><td>1003</td><td>61435-FCS</td><td>Open</td><td>40</td><td>0</td><td>No</td></tr>
+  <tr><td>1004</td><td>61435-FCS</td><td>Open</td><td>40</td><td>W=3 Top-up vac=2</td><td>Yes</td></tr>
+</table>
+</body></html>

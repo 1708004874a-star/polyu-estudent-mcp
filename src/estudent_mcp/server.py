@@ -99,9 +99,16 @@ async def get_exam_schedule(term: Optional[str] = None) -> dict:
 
 
 @mcp.tool()
-async def search_subjects(query: str) -> dict:
-    """Search subject offerings by code or keyword; includes vacancy info."""
-    return await _safe(_get_backend().search_subjects(query))
+async def search_subjects(query: str, term: Optional[str] = None) -> dict:
+    """Search subject offerings by code or keyword.
+
+    `query`: a subject code ("COMP1011") or a title keyword. `term`: an academic
+    year/semester label like "2025/26 Semester 1" (defaults to the most recent
+    offered term). When the query resolves to exactly one subject, its teaching
+    groups with per-group vacancy are included; broad searches return
+    subject-level results only.
+    """
+    return await _safe(_get_backend().search_subjects(query, term))
 
 
 # --- registration (two-step confirmation) ----------------------------------

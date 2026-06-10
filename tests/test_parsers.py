@@ -1,6 +1,13 @@
 from pathlib import Path
 
-from estudent_mcp.parsers import parse_exam_schedule, parse_grades, parse_timetable
+from estudent_mcp.parsers import (
+    parse_exam_schedule,
+    parse_grades,
+    parse_subject_detail,
+    parse_subject_search,
+    parse_vacancy,
+    parse_timetable,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -58,3 +65,56 @@ def test_parse_timetable_reads_main_table_only():
     assert s.venue == "Z211"
     assert s.teaching_staff == "LEUNG, Zachary"
     assert s.weeks == "1-13"
+
+
+# --- subject search (subject-level list) -----------------------------------
+
+
+def test_parse_subject_search_lists_subjects():
+    subjects = parse_subject_search(_load("subject_search_sample.html"))
+    assert len(subjects) == 2
+    by_code = {s.subject_code: s for s in subjects}
+    assert by_code["COMP1011"].subject_title == "PROGRAMMING FUNDAMENTALS"
+    assert by_code["COMP1011"].offering_department == "DEPARTMENT OF COMPUTING"
+    assert by_code["COMP1011"].credits == 3.0
+    assert by_code["COMP2012"].level == "2"
+    # No drill-in => no groups, no vacancy.
+    assert by_code["COMP1011"].groups == []
+    assert by_code["COMP1011"].has_vacancy is False
+
+
+# --- vacancy cell parsing --------------------------------------------------
+
+
+def test_parse_vacancy_variants():
+    assert parse_vacancy("5") == (5, False)
+    assert parse_vacancy("0") == (0, False)
+    assert parse_vacancy("(4)") == (4, True)  # reserved/held
+    assert parse_vacancy("W=3 Top-up vac=2") == (2, False)
+    assert parse_vacancy("") == (None, False)
+
+
+# --- subject detail (groups + vacancy) -------------------------------------
+
+
+def test_parse_subject_detail_reads_groups_and_vacancy():
+    subj = parse_subject_detail(_load("subject_detail_sample.html"))
+    assert subj.subject_code == "COMP1011"
+    assert subj.subject_title == "PROGRAMMING FUNDAMENTALS"
+    assert subj.credits == 3.0
+    assert len(subj.groups) == 4
+    g = {grp.group_code: grp for grp in subj.groups}
+    # Open vacancy of 5 -> grabbable.
+    assert g["1001"].vacancy == 5
+    assert g["1001"].has_open_vacancy is True
+    # Bracketed (4) -> reserved, NOT openly grabbable.
+    assert g["1002"].vacancy == 4
+    assert g["1002"].reserved is True
+    assert g["1002"].has_open_vacancy is False
+    # Zero vacancy.
+    assert g["1003"].has_open_vacancy is False
+    # Waitlist top-up of 2 is open.
+    assert g["1004"].vacancy == 2
+    assert g["1004"].has_open_vacancy is True
+    # Subject-level has_vacancy true because at least one group is open.
+    assert subj.has_vacancy is True

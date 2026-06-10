@@ -24,7 +24,13 @@ from ..models import (
     SubjectOffering,
     TimetableSlot,
 )
-from ..parsers import parse_exam_schedule, parse_grades, parse_timetable
+from ..parsers import (
+    parse_exam_schedule,
+    parse_grades,
+    parse_subject_detail,
+    parse_subject_search,
+    parse_timetable,
+)
 from ..registration import compute_fingerprint, summarize
 from .base import EStudentBackend
 
@@ -52,7 +58,26 @@ SEL_LANDING_LOGIN = "input[type=submit]"
 SEL_GRADES_YEARSEM = "#mainForm\\:yearSem"
 SEL_GRADES_GO = "#mainForm\\:goBtn"
 
+# Subject-search page controls.
+SEL_SEARCH_BY_SUBJECT = "#mainForm\\:bySubject"
+SEL_SEARCH_YEARSEM = "#mainForm\\:yearsem"
+SEL_SEARCH_SUBJCODE = "#mainForm\\:subjCode"
+SEL_SEARCH_SUBJTITLE = "#mainForm\\:subjTitle"
+SEL_SEARCH_BTN = "#mainForm\\:searchBtn"
+SEL_SEARCH_TABLE = "table[id$=searchTable]"
+# First subject-code drill-in link in the result table.
+SEL_SEARCH_FIRST_CODE = "a[id$=':0:subjCode']"
+
 DEFAULT_ORIGIN = "https://www38.polyu.edu.hk"
+
+import re as _re
+
+# A subject code is letters optionally followed by digits, e.g. "COMP", "COMP1011".
+_CODE_RE = _re.compile(r"^[A-Za-z]{2,4}\d{0,4}[A-Za-z]?$")
+
+
+def _looks_like_code(query: str) -> bool:
+    return bool(_CODE_RE.match(query.strip()))
 
 
 class PlaywrightBackend(EStudentBackend):
@@ -255,11 +280,125 @@ class PlaywrightBackend(EStudentBackend):
             raise PageStructureError(f"Failed to load exams: {exc}", screenshot=shot)
         return parse_exam_schedule(html)
 
-    async def search_subjects(self, query: str) -> list[SubjectOffering]:
-        # NEEDS_CALIBRATION: the subject-search page form has not been probed yet.
-        raise PageStructureError(
-            "search_subjects is not yet calibrated to the live subject-search page."
+    async def _open_search(self):
+        await self._page.goto(
+            self._secure_url(PATH_SUBJECT_SEARCH),
+            wait_until="domcontentloaded",
+            timeout=45000,
         )
+        await self._page.wait_for_timeout(2500)
+
+    async def _available_terms(self) -> list[str]:
+        """Real year/sem option labels (excluding the placeholder), in page order."""
+        labels = await self._page.eval_on_selector_all(
+            f"{SEL_SEARCH_YEARSEM} option",
+            "els => els.map(o => o.text.trim())",
+        )
+        return [t for t in labels if t and "Please Select" not in t]
+
+    async def _search_once(self, query: str, term: str) -> str:
+        await self._open_search()
+        await self._page.check(SEL_SEARCH_BY_SUBJECT)
+        await self._page.wait_for_timeout(500)
+        await self._page.select_option(SEL_SEARCH_YEARSEM, label=term)
+        await self._page.wait_for_timeout(800)
+        # A code-looking query goes to subjCode; otherwise treat it as a title.
+        field = SEL_SEARCH_SUBJCODE if _looks_like_code(query) else SEL_SEARCH_SUBJTITLE
+        await self._page.fill(field, query)
+        await self._page.click(SEL_SEARCH_BTN)
+        await self._page.wait_for_timeout(3500)
+        return await self._page.content()
+
+    async def _run_subject_search(
+        self, query: str, term: Optional[str]
+    ) -> tuple[str, str]:
+        """Run the search; if no term is given, try each offered term until one
+        yields results. Returns (html, term_used)."""
+        await self._open_search()
+        terms = [term] if term else await self._available_terms()
+        last_html = ""
+        for t in terms:
+            last_html = await self._search_once(query, t)
+            if parse_subject_search(last_html):
+                return last_html, t
+        return last_html, (terms[-1] if terms else "")
+
+    async def _collect_search_results(self) -> list[SubjectOffering]:
+        """Walk the RichFaces datascroller, collecting every result page.
+
+        Results are paginated (~20/page); the "next" scroller button carries an
+        onclick only while enabled, so an empty `td[onclick*=next]` match means
+        we are on the last page. Dedupe by code and cap iterations for safety.
+        """
+        seen: dict[str, SubjectOffering] = {}
+        order: list[str] = []
+        for _ in range(60):  # safety cap (~1200 subjects)
+            html = await self._page.content()
+            new_on_page = False
+            for o in parse_subject_search(html):
+                if o.subject_code not in seen:
+                    seen[o.subject_code] = o
+                    order.append(o.subject_code)
+                    new_on_page = True
+            nxt = self._page.locator('td[onclick*="next"]')
+            if await nxt.count() == 0 or not new_on_page:
+                break
+            try:
+                await nxt.first.click()
+            except Exception:
+                break
+            await self._page.wait_for_timeout(2000)
+        return [seen[c] for c in order]
+
+    async def search_subjects(
+        self, query: str, term: Optional[str] = None
+    ) -> list[SubjectOffering]:
+        await self.login()
+        try:
+            await self._run_subject_search(query, term)
+            offerings = await self._collect_search_results()
+        except Exception as exc:
+            shot = await self._screenshot("subject-search")
+            raise PageStructureError(f"Subject search failed: {exc}", screenshot=shot)
+        # If exactly one subject matched, drill in so the caller gets vacancy too.
+        if len(offerings) == 1:
+            try:
+                await self._page.click(SEL_SEARCH_FIRST_CODE)
+                await self._page.wait_for_timeout(3000)
+                detail = parse_subject_detail(await self._page.content())
+                if detail.subject_code == offerings[0].subject_code:
+                    offerings[0].groups = detail.groups
+            except Exception:
+                pass  # keep subject-level result if drill-in fails
+        return offerings
+
+    async def get_subject_groups(
+        self, subject_code: str, term: Optional[str] = None
+    ) -> SubjectOffering:
+        await self.login()
+        try:
+            html, _ = await self._run_subject_search(subject_code, term)
+            offerings = parse_subject_search(html)
+            # Find the exact-code row index, then click that drill-in link.
+            idx = next(
+                (i for i, o in enumerate(offerings)
+                 if o.subject_code.upper() == subject_code.upper()),
+                None,
+            )
+            if idx is None:
+                raise PageStructureError(
+                    f"Subject {subject_code} not found for the selected term."
+                )
+            await self._page.click(f"a[id$=':{idx}:subjCode']")
+            await self._page.wait_for_timeout(3000)
+            return parse_subject_detail(await self._page.content())
+        except PageStructureError:
+            raise
+        except Exception as exc:
+            shot = await self._screenshot("subject-groups")
+            raise PageStructureError(
+                f"Could not read groups for {subject_code}: {exc}", screenshot=shot
+            )
 
     # --- registration (two-step) ------------------------------------------
 

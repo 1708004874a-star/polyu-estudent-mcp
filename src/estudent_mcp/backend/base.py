@@ -45,8 +45,19 @@ class EStudentBackend(ABC):
         ...
 
     @abstractmethod
-    async def search_subjects(self, query: str) -> list[SubjectOffering]:
-        ...
+    async def search_subjects(
+        self, query: str, term: str | None = None
+    ) -> list[SubjectOffering]:
+        """Search offerings by subject code or title. If the query resolves to a
+        single subject, its groups (with vacancy) are populated; otherwise the
+        result is subject-level only."""
+
+    @abstractmethod
+    async def get_subject_groups(
+        self, subject_code: str, term: str | None = None
+    ) -> SubjectOffering:
+        """Drill into one subject and return it with per-group vacancy filled in.
+        This is what vacancy-watching relies on."""
 
     @abstractmethod
     async def preview_registration(

@@ -8,11 +8,19 @@ the joint-debug phase using saved HTML fixtures from the live portal.
 from .grades import parse_grades
 from .timetable import parse_timetable
 from .exams import parse_exam_schedule
-from .subjects import parse_subject_search
+from .subjects import (
+    parse_subject_detail,
+    parse_subject_groups,
+    parse_subject_search,
+    parse_vacancy,
+)
 
 __all__ = [
     "parse_grades",
     "parse_timetable",
     "parse_exam_schedule",
     "parse_subject_search",
+    "parse_subject_detail",
+    "parse_subject_groups",
+    "parse_vacancy",
 ]

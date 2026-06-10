@@ -58,18 +58,46 @@ class ExamEntry:
 
 
 @dataclass
+class SubjectGroup:
+    """One teaching group of a subject, as shown on the subject-detail page.
+
+    eStudent's Vacancies column is nuanced: a plain number is open vacancy; a
+    number in round brackets like "(4)" is a *reserved* quota (held for specific
+    programmes, not freely grabbable); when a waitlist exists the cell reads
+    "W=… Top-up vac=…". We keep the literal cell in `vacancy_raw` and expose a
+    conservative `has_open_vacancy`.
+    """
+
+    group_code: str
+    group_type: str = ""
+    eligible_programmes: str = ""
+    group_size: Optional[int] = None
+    vacancy_raw: str = ""
+    vacancy: Optional[int] = None  # best-effort integer parsed from vacancy_raw
+    reserved: bool = False  # True when the vacancy figure is bracketed/held
+    waitlist_available: str = ""
+
+    @property
+    def has_open_vacancy(self) -> bool:
+        return self.vacancy is not None and self.vacancy > 0 and not self.reserved
+
+
+@dataclass
 class SubjectOffering:
+    """A subject as returned by the search page. `groups` is populated only after
+    drilling into the subject-detail page (search results are subject-level)."""
+
     subject_code: str
     subject_title: str
-    section: str
-    capacity: Optional[int]
-    enrolled: Optional[int]
-    vacancy: Optional[int]
-    schedule: str = ""
+    offering_department: str = ""
+    category: str = ""
+    level: str = ""
+    credits: Optional[float] = None
+    groups: list["SubjectGroup"] = field(default_factory=list)
 
     @property
     def has_vacancy(self) -> bool:
-        return self.vacancy is not None and self.vacancy > 0
+        return any(g.has_open_vacancy for g in self.groups)
 
 
 # A registration action the user wants to perform.
