@@ -1,7 +1,11 @@
 # Credentials & session — never commit
 .env
+.env.*
+!.env.example
 .runtime/
 *.storage_state.json
+*.secret
+credentials.json
 
 # Python
 __pycache__/
