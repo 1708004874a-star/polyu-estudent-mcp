@@ -1,0 +1,19 @@
+# Credentials & session — never commit
+.env
+.runtime/
+*.storage_state.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# OS
+.DS_Store
+
+# Debug artifacts
+screenshots/
+*.debug.html
