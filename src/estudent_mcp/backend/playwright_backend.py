@@ -1,9 +1,10 @@
-"""Scheme A backend: drive eStudent with a real (headless) browser.
+"""Scheme A backend: drive PolyU eStudent with a headless browser.
 
-What is calibrated during joint-debug (marked `NEEDS_CALIBRATION`): the exact
-URLs, login form field selectors, and the table selectors passed to parsers.
-Everything else — session persistence, login orchestration, the preview/confirm
-invariant, screenshot-on-failure — is final.
+Calibrated against the live portal (2026-06). Login is PolyU's ADFS SSO:
+the eStudent landing page has a single "login" button that redirects to
+adfs.polyu.edu.hk, which presents NetID + password fields (no 2FA for this
+account). After auth the session lands on /eStudent/secure/home.jsf and is
+persisted via Playwright storage_state.
 """
 
 from __future__ import annotations
@@ -23,35 +24,35 @@ from ..models import (
     SubjectOffering,
     TimetableSlot,
 )
-from ..parsers import (
-    parse_exam_schedule,
-    parse_grades,
-    parse_subject_search,
-    parse_timetable,
-)
+from ..parsers import parse_exam_schedule, parse_grades, parse_timetable
 from ..registration import compute_fingerprint, summarize
 from .base import EStudentBackend
 
-# --- NEEDS_CALIBRATION: live portal coordinates ----------------------------
-# Filled in during joint-debug by walking the real pages with a headful browser.
-LOGIN_URL = "{base}/login"
-GRADES_URL = "{base}/grades"
-TIMETABLE_URL = "{base}/timetable"
-EXAMS_URL = "{base}/exams"
-SUBJECT_SEARCH_URL = "{base}/subjects"
-REGISTRATION_URL = "{base}/registration"
+# eStudent entry — the configured base_url redirects here.
+ESTUDENT_LANDING = "https://www38.polyu.edu.hk/eStudent/"
 
-SEL_NETID_INPUT = "#username"
-SEL_PASSWORD_INPUT = "#password"
-SEL_LOGIN_SUBMIT = "button[type=submit]"
-SEL_LOGGED_IN_MARKER = "text=Logout"  # presence => authenticated
-SEL_LOGIN_ERROR = ".login-error"
+# Secure-page paths, joined to whatever origin we end up on after login.
+PATH_HOME = "/eStudent/secure/home.jsf"
+PATH_GRADES = "/eStudent/secure/my-results/enquiry-overall-result.jsf"
+PATH_TIMETABLE = "/eStudent/secure/my-timetable/enquiry-class-timetable.jsf"
+PATH_EXAMS = "/eStudent/secure/my-timetable/exam-timetable.jsf"
+PATH_SUBJECT_SEARCH = "/eStudent/secure/information/subject-search.jsf"
+PATH_REGISTRATION = (
+    "/eStudent/secure/my-subject-registration/"
+    "subject-register-select-acad-year-sem.jsf"
+)
 
-SEL_GRADES_TABLE = "table"
-SEL_TIMETABLE_TABLE = "table"
-SEL_EXAMS_TABLE = "table"
-SEL_SUBJECTS_TABLE = "table"
-# ---------------------------------------------------------------------------
+# ADFS login form (standard Microsoft ADFS field ids).
+SEL_NETID = "#userNameInput"
+SEL_PASSWORD = "#passwordInput"
+SEL_SSO_SUBMIT = "#submitButton"
+SEL_LANDING_LOGIN = "input[type=submit]"
+
+# Grades page controls.
+SEL_GRADES_YEARSEM = "#mainForm\\:yearSem"
+SEL_GRADES_GO = "#mainForm\\:goBtn"
+
+DEFAULT_ORIGIN = "https://www38.polyu.edu.hk"
 
 
 class PlaywrightBackend(EStudentBackend):
@@ -61,21 +62,18 @@ class PlaywrightBackend(EStudentBackend):
         self._browser = None
         self._context = None
         self._page = None
+        self._origin = DEFAULT_ORIGIN
 
     # --- lifecycle ---------------------------------------------------------
 
     async def _ensure_browser(self):
         if self._page is not None:
             return
-        # Imported lazily so importing this module (e.g. for tests) doesn't
-        # require Playwright's browsers to be installed.
         from playwright.async_api import async_playwright
 
         self._pw = await async_playwright().start()
         self._browser = await self._pw.chromium.launch(headless=not self._cfg.headful)
-        storage = (
-            str(STORAGE_STATE_PATH) if STORAGE_STATE_PATH.exists() else None
-        )
+        storage = str(STORAGE_STATE_PATH) if STORAGE_STATE_PATH.exists() else None
         self._context = await self._browser.new_context(storage_state=storage)
         self._page = await self._context.new_page()
 
@@ -100,29 +98,31 @@ class PlaywrightBackend(EStudentBackend):
     async def _screenshot(self, tag: str) -> str:
         path = SCREENSHOT_DIR / f"{tag}-{datetime.now():%Y%m%d-%H%M%S}.png"
         try:
-            await self._page.screenshot(path=str(path))
+            # animations='disabled' + short timeout avoids the web-font hang.
+            await self._page.screenshot(path=str(path), timeout=8000)
         except Exception:
             return ""
         return str(path)
 
-    async def _is_logged_in(self) -> bool:
-        try:
-            return (await self._page.query_selector(SEL_LOGGED_IN_MARKER)) is not None
-        except Exception:
-            return False
+    def _secure_url(self, path: str) -> str:
+        return f"{self._origin}{path}"
+
+    async def _on_secure_page(self) -> bool:
+        url = self._page.url
+        return "/eStudent/secure/" in url and "adfs." not in url
 
     # --- auth --------------------------------------------------------------
 
     async def session_status(self) -> SessionState:
         await self._ensure_browser()
-        # Hitting the grades URL is a cheap authenticated-page probe.
         try:
             await self._page.goto(
-                GRADES_URL.format(base=self._cfg.base_url), wait_until="domcontentloaded"
+                self._secure_url(PATH_HOME), wait_until="domcontentloaded", timeout=45000
             )
+            await self._page.wait_for_timeout(1500)
         except Exception as exc:
             raise LoginError(f"Could not reach portal: {exc}")
-        ok = await self._is_logged_in()
+        ok = await self._on_secure_page()
         return SessionState(
             logged_in=ok,
             netid=self._cfg.netid,
@@ -130,84 +130,136 @@ class PlaywrightBackend(EStudentBackend):
         )
 
     async def login(self) -> SessionState:
+        await self._ensure_browser()
+
+        # Reuse a persisted session if still valid.
+        if await self._try_reuse_session():
+            return SessionState(
+                logged_in=True, netid=self._cfg.netid, detail="Reused saved session."
+            )
+
         if not self._cfg.has_credentials:
             raise CredentialsError(
                 "No credentials configured. Copy .env.example to .env and fill in "
                 "ESTUDENT_NETID and ESTUDENT_PASSWORD."
             )
-        await self._ensure_browser()
-
-        # Reuse an existing valid session if storage_state carried one over.
-        status = await self.session_status()
-        if status.logged_in:
-            return status
 
         try:
             await self._page.goto(
-                LOGIN_URL.format(base=self._cfg.base_url),
-                wait_until="domcontentloaded",
+                ESTUDENT_LANDING, wait_until="domcontentloaded", timeout=45000
             )
-            await self._page.fill(SEL_NETID_INPUT, self._cfg.netid)
-            await self._page.fill(SEL_PASSWORD_INPUT, self._cfg.password)
-            await self._page.click(SEL_LOGIN_SUBMIT)
-            await self._page.wait_for_load_state("networkidle")
+            await self._page.wait_for_timeout(1000)
+            # Landing -> ADFS SSO.
+            async with self._page.expect_navigation(
+                wait_until="domcontentloaded", timeout=30000
+            ):
+                await self._page.click(SEL_LANDING_LOGIN)
+            # Fill ADFS credentials.
+            await self._page.fill(SEL_NETID, self._cfg.netid)
+            await self._page.fill(SEL_PASSWORD, self._cfg.password)
+            async with self._page.expect_navigation(
+                wait_until="domcontentloaded", timeout=30000
+            ):
+                await self._page.click(SEL_SSO_SUBMIT)
+            await self._page.wait_for_timeout(2500)
         except Exception as exc:
             shot = await self._screenshot("login-error")
             raise LoginError(f"Login flow failed: {exc}", screenshot=shot)
 
-        if await self._page.query_selector(SEL_LOGIN_ERROR) is not None:
-            raise CredentialsError("Portal rejected the credentials. Check .env.")
-        if not await self._is_logged_in():
+        if "adfs." in self._page.url:
+            # Still on ADFS => credentials rejected or an extra step (e.g. 2FA).
+            shot = await self._screenshot("login-rejected")
+            raise CredentialsError(
+                "Still on the ADFS sign-in page after submitting — credentials "
+                "rejected, or an extra verification step (e.g. 2FA) appeared.",
+                screenshot=shot,
+            )
+        if not await self._on_secure_page():
             shot = await self._screenshot("login-unknown")
             raise LoginError(
-                "Login did not reach an authenticated page.", screenshot=shot
+                "Login did not reach an authenticated eStudent page.", screenshot=shot
             )
 
+        # Remember the origin we actually landed on, persist the session.
+        self._origin = self._page.url.split("/eStudent/")[0]
         await self._context.storage_state(path=str(STORAGE_STATE_PATH))
         return SessionState(logged_in=True, netid=self._cfg.netid, detail="Logged in.")
 
+    async def _try_reuse_session(self) -> bool:
+        try:
+            await self._page.goto(
+                self._secure_url(PATH_HOME), wait_until="domcontentloaded", timeout=30000
+            )
+            await self._page.wait_for_timeout(1200)
+        except Exception:
+            return False
+        if await self._on_secure_page():
+            self._origin = self._page.url.split("/eStudent/")[0]
+            return True
+        return False
+
     # --- read operations ---------------------------------------------------
 
-    async def _fetch_html(self, url_tmpl: str, tag: str) -> str:
+    async def get_grades(self, term: Optional[str] = None) -> GradesReport:
         await self.login()
         try:
             await self._page.goto(
-                url_tmpl.format(base=self._cfg.base_url),
-                wait_until="domcontentloaded",
+                self._secure_url(PATH_GRADES), wait_until="domcontentloaded", timeout=45000
             )
-            return await self._page.content()
+            await self._page.wait_for_timeout(2000)
+            await self._page.select_option(SEL_GRADES_YEARSEM, label="All Semesters")
+            await self._page.wait_for_timeout(500)
+            await self._page.click(SEL_GRADES_GO)
+            await self._page.wait_for_timeout(4000)
+            html = await self._page.content()
         except Exception as exc:
-            shot = await self._screenshot(tag)
-            raise PageStructureError(
-                f"Failed to load {tag} page: {exc}", screenshot=shot
-            )
-
-    async def get_grades(self, term: Optional[str] = None) -> GradesReport:
-        html = await self._fetch_html(GRADES_URL, "grades")
-        report = parse_grades(html, SEL_GRADES_TABLE)
+            shot = await self._screenshot("grades")
+            raise PageStructureError(f"Failed to load grades: {exc}", screenshot=shot)
+        report = parse_grades(html)
         if term:
             report.entries = [e for e in report.entries if e.term == term]
         return report
 
     async def get_timetable(self, term: Optional[str] = None) -> list[TimetableSlot]:
-        html = await self._fetch_html(TIMETABLE_URL, "timetable")
-        return parse_timetable(html, SEL_TIMETABLE_TABLE)
+        await self.login()
+        try:
+            await self._page.goto(
+                self._secure_url(PATH_TIMETABLE),
+                wait_until="domcontentloaded",
+                timeout=45000,
+            )
+            await self._page.wait_for_timeout(2500)
+            selects = self._page.locator("select")
+            if term:
+                await selects.nth(0).select_option(label=term)
+                await self._page.wait_for_timeout(3000)
+            # Second select = view; choose List for a parseable table.
+            await self._page.locator("select").nth(1).select_option(label="List")
+            await self._page.wait_for_timeout(3500)
+            html = await self._page.content()
+        except Exception as exc:
+            shot = await self._screenshot("timetable")
+            raise PageStructureError(f"Failed to load timetable: {exc}", screenshot=shot)
+        return parse_timetable(html)
 
     async def get_exam_schedule(self, term: Optional[str] = None) -> list[ExamEntry]:
-        html = await self._fetch_html(EXAMS_URL, "exams")
-        return parse_exam_schedule(html, SEL_EXAMS_TABLE)
+        await self.login()
+        try:
+            await self._page.goto(
+                self._secure_url(PATH_EXAMS), wait_until="domcontentloaded", timeout=45000
+            )
+            await self._page.wait_for_timeout(2500)
+            html = await self._page.content()
+        except Exception as exc:
+            shot = await self._screenshot("exams")
+            raise PageStructureError(f"Failed to load exams: {exc}", screenshot=shot)
+        return parse_exam_schedule(html)
 
     async def search_subjects(self, query: str) -> list[SubjectOffering]:
-        html = await self._fetch_html(SUBJECT_SEARCH_URL, "subjects")
-        offerings = parse_subject_search(html, SEL_SUBJECTS_TABLE)
-        q = query.upper().strip()
-        if q:
-            offerings = [
-                o
-                for o in offerings
-                if q in o.subject_code.upper() or q in o.subject_title.upper()
-            ]
-        return offerings
+        # NEEDS_CALIBRATION: the subject-search page form has not been probed yet.
+        raise PageStructureError(
+            "search_subjects is not yet calibrated to the live subject-search page."
+        )
 
     # --- registration (two-step) ------------------------------------------
 
@@ -216,8 +268,7 @@ class PlaywrightBackend(EStudentBackend):
     ) -> RegistrationPreview:
         await self.login()
         # NEEDS_CALIBRATION: real conflict detection navigates the registration
-        # page and reads the system's validation response. The fingerprint and
-        # summary are final and independent of the live page.
+        # page. Fingerprint + summary are final.
         fingerprint = compute_fingerprint(items)
         return RegistrationPreview(
             items=items,
@@ -240,9 +291,8 @@ class PlaywrightBackend(EStudentBackend):
                 items=items,
             )
         await self.login()
-        # NEEDS_CALIBRATION: perform the real add/drop submission on the
-        # registration page and read back the system receipt.
+        # NEEDS_CALIBRATION: perform the real add/drop submission.
         raise PageStructureError(
             "confirm_registration submission not yet calibrated to the live "
-            "registration page (joint-debug phase)."
+            "registration page."
         )

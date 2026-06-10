@@ -17,6 +17,7 @@ class GradeEntry:
     credits: Optional[float]
     grade: str
     term: str
+    remark_code: str = ""
 
 
 @dataclass
@@ -29,23 +30,31 @@ class GradesReport:
 @dataclass
 class TimetableSlot:
     subject_code: str
-    activity: str  # e.g. "Lecture", "Tutorial"
+    subject_title: str
+    subject_group: str
+    component: str  # e.g. "LEC001", "TUT002"
     day: str
     start_time: str
     end_time: str
     venue: str
-    weeks: str = ""
+    teaching_staff: str = ""
+    weeks: str = ""  # e.g. "1-13"
+    remark: str = ""
 
 
 @dataclass
 class ExamEntry:
     subject_code: str
     subject_title: str
+    subject_group: str
+    exam_component: str
     date: str
     start_time: str
     end_time: str
     venue: str
     seat: str = ""
+    open_book: str = ""
+    remark: str = ""
 
 
 @dataclass

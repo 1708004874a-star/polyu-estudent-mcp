@@ -1,10 +1,24 @@
-<!-- Synthetic fixture matching the documented generic table structure.
-     Replaced with real (de-identified) eStudent HTML during joint-debug. -->
+<!-- Mirrors the live eStudent Assessment Results structure (2026-06):
+     one <table> per semester, preceded by a "YYYY/YY Semester N" heading.
+     Data is fake. -->
 <html><body>
-<table id="grades">
-  <tr><th>Subject Code</th><th>Subject Title</th><th>Credits</th><th>Grade</th><th>Term</th></tr>
-  <tr><td>COMP1011</td><td>Programming Fundamentals</td><td>3</td><td>A</td><td>2024-25 Sem 1</td></tr>
-  <tr><td>MATH1011</td><td>Calculus</td><td>3</td><td>B+</td><td>2024-25 Sem 1</td></tr>
-  <tr><td>ELC1011</td><td>English</td><td>2</td><td>A-</td><td>2024-25 Sem 2</td></tr>
-</table>
+<div class="block">
+  <h3>2024/25 Semester 1</h3>
+  <div>Mode of Attendance: FULL-TIME</div>
+  <table>
+    <tr><th>Code</th><th>Title</th><th>Credit</th><th>Grade</th><th>Remark Code</th></tr>
+    <tr><td>COMP1011</td><td>PROGRAMMING FUNDAMENTALS</td><td>3.00</td><td>A</td><td></td></tr>
+    <tr><td>MATH1011</td><td>CALCULUS</td><td>3.00</td><td>B+</td><td></td></tr>
+  </table>
+  <div>GPA: 3.50 Sem GPA: 3.50 WGPA: 3.50</div>
+</div>
+<div class="block">
+  <h3>2024/25 Semester 2</h3>
+  <div>Mode of Attendance: FULL-TIME</div>
+  <table>
+    <tr><th>Code</th><th>Title</th><th>Credit</th><th>Grade</th><th>Remark Code</th></tr>
+    <tr><td>ELC1011</td><td>ENGLISH</td><td>2.00</td><td>A-</td><td>R</td></tr>
+  </table>
+  <div>GPA: 3.60 Sem GPA: 3.70 WGPA: 3.60</div>
+</div>
 </body></html>
