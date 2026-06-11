@@ -40,8 +40,10 @@ search subjects, and (work in progress) add/drop & snipe courses.
   resolves to exactly one subject it drills into the detail page to return each
   teaching group's **vacancy** (handles `5` open / `(4)` reserved / `W=.. Top-up
   vac=..` waitlist).
-- **Two-step registration invariant**, **sniper frequency floors**, and all
-  **parsers** are unit-tested (19 tests).
+- **Two-step registration invariant**, **sniper frequency floors**, the
+  sniper's **self-healing retry logic** (auto re-login, browser relaunch,
+  open-time → vacancy-watch fallback), and all **parsers** are unit-tested
+  (24 tests).
 
 ### Not finished yet
 
@@ -146,8 +148,17 @@ Frequency floors are enforced (sub-floor configs are rejected):
 - **open_time** mode: retry ≥ 3s, total window ≤ 2 min.
 - **watch_vacancy** mode: poll ≥ 60s.
 
-Keep your Mac awake while a job runs. Set `ESTUDENT_HEADFUL=1` to watch the
-browser.
+Within those floors, jobs are **self-healing**: every attempt re-checks the
+session (an expired login re-authenticates automatically with your `.env`
+credentials), a crashed browser is closed and relaunched, and transient errors
+(network blips, page hiccups) just count as a missed attempt. Only rejected
+credentials or 5 identical errors in a row end a job early. Pass
+`then_watch=true` to *open_time* so an unsuccessful open window falls through
+to vacancy watching instead of giving up. Terminal events (grabbed / fallback /
+failed) raise a native macOS notification.
+
+Keep your Mac awake while a job runs — e.g. `caffeinate -dims` in a spare
+terminal. Set `ESTUDENT_HEADFUL=1` to watch the browser.
 
 ---
 
@@ -246,7 +257,8 @@ Personal use. No warranty.
 - **`search_subjects`** 支持**按科目**（代码/标题）和**按专业**（院系 → 专业级联）两种
   模式；无学期时自动逐学期尝试；自动翻页收齐全部科目；命中单个科目时下钻详情页返回每个
   教学组的**名额**（识别 `5` 开放 / `(4)` 保留 / `W=.. Top-up vac=..` 候补）。
-- **两步选课确认**、**抢课频率下限**、所有**解析器**均有单测（19 个）。
+- **两步选课确认**、**抢课频率下限**、抢课**自愈重试逻辑**（自动重登、浏览器重启、
+  开抢失败转捡漏）、所有**解析器**均有单测（24 个）。
 
 ### 尚未完成
 
@@ -344,7 +356,14 @@ claude mcp get estudent     # 应显示 ✔ Connected
 - **open_time** 模式：重试间隔 ≥ 3 秒，总时长 ≤ 2 分钟。
 - **watch_vacancy** 模式：轮询间隔 ≥ 60 秒。
 
-任务运行时让 Mac 保持唤醒。设 `ESTUDENT_HEADFUL=1` 可看到浏览器。
+在下限之内，任务具备**自愈能力**：每次尝试都会重新校验会话（登录过期会自动用
+`.env` 凭据重新登录）；浏览器崩溃会关闭重启；网络抖动、页面异常等瞬时错误只算
+一次未抢到。只有密码被拒、或同类错误连续 5 次才会提前终止任务。*open_time*
+模式可传 `then_watch=true`：开抢窗口没抢到时自动转入捡漏轮询而不是放弃。
+抢到 / 转捡漏 / 失败等终态会弹出 macOS 系统通知。
+
+任务运行时让 Mac 保持唤醒——可在另一个终端跑 `caffeinate -dims`。
+设 `ESTUDENT_HEADFUL=1` 可看到浏览器。
 
 ---
 

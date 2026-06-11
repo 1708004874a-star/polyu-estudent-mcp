@@ -17,7 +17,7 @@ from enum import Enum
 from typing import Awaitable, Callable, Optional
 
 from .backend.base import EStudentBackend
-from .errors import FrequencyError
+from .errors import CredentialsError, FrequencyError
 from .models import RegistrationItem
 
 # --- Frequency safety bounds (seconds) -------------------------------------
@@ -25,6 +25,10 @@ from .models import RegistrationItem
 OPEN_TIME_MIN_RETRY_INTERVAL = 3.0      # retries no faster than every 3s
 OPEN_TIME_MAX_TOTAL_DURATION = 120.0    # stop retrying after 2 minutes
 WATCH_VACANCY_MIN_INTERVAL = 60.0       # check vacancy no more than once a minute
+
+# Same transient error this many times in a row => the problem isn't going
+# away on its own (portal redesign, network down); stop burning attempts.
+MAX_CONSECUTIVE_ERRORS = 5
 
 
 class SniperMode(str, Enum):
@@ -81,7 +85,9 @@ class SniperJob:
     retry_interval: float = OPEN_TIME_MIN_RETRY_INTERVAL
     total_duration: float = OPEN_TIME_MAX_TOTAL_DURATION
     watch_interval: float = WATCH_VACANCY_MIN_INTERVAL
+    then_watch: bool = False
     attempts: int = 0
+    consecutive_errors: int = 0
     log: list[str] = field(default_factory=list)
     _task: Optional[asyncio.Task] = field(default=None, repr=False)
 
@@ -91,6 +97,7 @@ class SniperJob:
             "mode": self.mode.value,
             "status": self.status.value,
             "detail": self.detail,
+            "then_watch": self.then_watch,
             "attempts": self.attempts,
             "items": [
                 {"action": i.action, "subject_code": i.subject_code, "section": i.section}
@@ -152,12 +159,20 @@ class SniperManager:
         open_time_epoch: float,
         retry_interval: float = OPEN_TIME_MIN_RETRY_INTERVAL,
         total_duration: float = OPEN_TIME_MAX_TOTAL_DURATION,
+        then_watch: bool = False,
+        watch_interval: float = WATCH_VACANCY_MIN_INTERVAL,
     ) -> SniperJob:
         validate_frequency(
             SniperMode.OPEN_TIME,
             retry_interval=retry_interval,
             total_duration=total_duration,
         )
+        if then_watch:
+            validate_frequency(
+                SniperMode.WATCH_VACANCY,
+                retry_interval=watch_interval,
+                watch_interval=watch_interval,
+            )
         job = SniperJob(
             job_id=uuid.uuid4().hex[:8],
             mode=SniperMode.OPEN_TIME,
@@ -165,6 +180,8 @@ class SniperManager:
             open_time_epoch=open_time_epoch,
             retry_interval=retry_interval,
             total_duration=total_duration,
+            then_watch=then_watch,
+            watch_interval=watch_interval,
         )
         self._jobs[job.job_id] = job
         job._task = asyncio.ensure_future(self._run_open_time(job))
@@ -190,6 +207,55 @@ class SniperManager:
         job._task = asyncio.ensure_future(self._run_watch_vacancy(job))
         return job
 
+    async def _safe_attempt(self, job: SniperJob) -> bool:
+        """Run one registration attempt; transient failures count as a miss.
+
+        A session that expired mid-job heals itself: every attempt begins with
+        backend.login(), which re-authenticates automatically. What login()
+        cannot heal is a dead browser/page object, so on any unexpected error
+        we also close the backend — the next attempt relaunches it from
+        scratch (fresh browser, fresh login). Only CredentialsError (wrong
+        password — retrying is pointless) or MAX_CONSECUTIVE_ERRORS identical
+        failures in a row escape to the caller and end the job.
+        """
+        try:
+            ok = await self._attempt(job.items)
+        except (asyncio.CancelledError, CredentialsError):
+            raise
+        except Exception as exc:  # noqa: BLE001 - transient: log, reset, retry
+            job.consecutive_errors += 1
+            job.log.append(
+                f"attempt {job.attempts}: {type(exc).__name__}: {exc} "
+                f"({job.consecutive_errors} consecutive)"
+            )
+            if job.consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                raise RuntimeError(
+                    f"{job.consecutive_errors} consecutive errors, last: {exc}"
+                ) from exc
+            if self._backend is not None:
+                try:
+                    await self._backend.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            return False
+        job.consecutive_errors = 0
+        if not ok:
+            job.log.append(f"attempt {job.attempts}: no luck")
+        return ok
+
+    async def _watch_loop(self, job: SniperJob) -> None:
+        """Poll for a vacancy forever (caller-bounded only by stop_job)."""
+        job.status = SniperStatus.RUNNING
+        while True:
+            job.attempts += 1
+            if await self._safe_attempt(job):
+                job.status = SniperStatus.SUCCEEDED
+                job.detail = f"Grabbed vacancy after {job.attempts} attempt(s)."
+                job.log.append(job.detail)
+                await self._notify(f"[sniper {job.job_id}] {job.detail}")
+                return
+            await self._sleep(job.watch_interval)
+
     async def _run_open_time(self, job: SniperJob) -> None:
         try:
             # Wait until the registration window opens.
@@ -203,15 +269,23 @@ class SniperManager:
             deadline = self._clock() + job.total_duration
             while self._clock() <= deadline:
                 job.attempts += 1
-                ok = await self._attempt(job.items)
-                if ok:
+                if await self._safe_attempt(job):
                     job.status = SniperStatus.SUCCEEDED
                     job.detail = f"Registered after {job.attempts} attempt(s)."
                     job.log.append(job.detail)
                     await self._notify(f"[sniper {job.job_id}] {job.detail}")
                     return
-                job.log.append(f"attempt {job.attempts}: no luck, retrying")
                 await self._sleep(job.retry_interval)
+
+            if job.then_watch:
+                job.detail = (
+                    f"Open window ended after {job.attempts} attempt(s); "
+                    f"falling back to vacancy watching every {job.watch_interval:.0f}s."
+                )
+                job.log.append(job.detail)
+                await self._notify(f"[sniper {job.job_id}] {job.detail}")
+                await self._watch_loop(job)
+                return
 
             job.status = SniperStatus.TIMED_OUT
             job.detail = f"Gave up after {job.attempts} attempt(s)."
@@ -227,18 +301,7 @@ class SniperManager:
 
     async def _run_watch_vacancy(self, job: SniperJob) -> None:
         try:
-            job.status = SniperStatus.RUNNING
-            while True:
-                job.attempts += 1
-                ok = await self._attempt(job.items)
-                if ok:
-                    job.status = SniperStatus.SUCCEEDED
-                    job.detail = f"Grabbed vacancy after {job.attempts} check(s)."
-                    job.log.append(job.detail)
-                    await self._notify(f"[sniper {job.job_id}] {job.detail}")
-                    return
-                job.log.append(f"check {job.attempts}: still full")
-                await self._sleep(job.watch_interval)
+            await self._watch_loop(job)
         except asyncio.CancelledError:
             job.status = SniperStatus.STOPPED
             raise

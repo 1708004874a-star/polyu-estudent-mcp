@@ -7,7 +7,9 @@ to an `EStudentBackend`.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
+import json
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -34,6 +36,25 @@ def _get_backend() -> EStudentBackend:
     return _backend
 
 
+async def _notify_macos(message: str) -> None:
+    """Push a native macOS notification banner; silently no-op elsewhere."""
+    script = (
+        f"display notification {json.dumps(message)} "
+        f'with title "eStudent sniper" sound name "Glass"'
+    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "osascript",
+            "-e",
+            script,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+    except Exception:  # noqa: BLE001 - notifications must never break a job
+        pass
+
+
 def _get_sniper() -> SniperManager:
     global _sniper
     if _sniper is None:
@@ -46,7 +67,7 @@ def _get_sniper() -> SniperManager:
             receipt = await backend.confirm_registration(items, preview.fingerprint)
             return receipt.success
 
-        _sniper = SniperManager(backend, attempt)
+        _sniper = SniperManager(backend, attempt, notifier=_notify_macos)
     return _sniper
 
 
@@ -182,13 +203,21 @@ async def start_course_sniper(
     retry_interval_seconds: float = 3.0,
     total_duration_seconds: float = 120.0,
     watch_interval_seconds: float = 60.0,
+    then_watch: bool = False,
 ) -> dict:
     """Start an automated course-grab job (restrained; hard frequency floors).
 
     mode="open_time": wait until `open_time_iso` (ISO 8601), then submit, retrying
     every `retry_interval_seconds` (>=3s) for up to `total_duration_seconds` (<=120s).
+    With `then_watch=true`, an unsuccessful open window falls through to
+    vacancy watching instead of giving up.
     mode="watch_vacancy": poll every `watch_interval_seconds` (>=60s) until a
     vacancy is grabbed. Sub-floor intervals are rejected.
+
+    Jobs self-heal: an expired session re-authenticates automatically, and a
+    crashed browser is relaunched; only rejected credentials or repeated
+    identical errors end a job early. Terminal events raise a macOS
+    notification.
     """
     items = [
         RegistrationItem(
@@ -212,6 +241,8 @@ async def start_course_sniper(
                 open_time_epoch=epoch,
                 retry_interval=retry_interval_seconds,
                 total_duration=total_duration_seconds,
+                then_watch=then_watch,
+                watch_interval=watch_interval_seconds,
             )
         elif mode == "watch_vacancy":
             job = sniper.start_watch_vacancy(items, watch_interval=watch_interval_seconds)

@@ -5,9 +5,10 @@ import asyncio
 
 import pytest
 
-from estudent_mcp.errors import FrequencyError
+from estudent_mcp.errors import CredentialsError, FrequencyError, LoginError
 from estudent_mcp.models import RegistrationItem
 from estudent_mcp.sniper import (
+    MAX_CONSECUTIVE_ERRORS,
     OPEN_TIME_MIN_RETRY_INTERVAL,
     SniperManager,
     SniperMode,
@@ -61,9 +62,19 @@ class FakeClock:
         await asyncio.sleep(0)
 
 
-def _manager(attempt, clock):
+class FakeBackend:
+    """Records close() calls — stands in for the browser-reset path."""
+
+    def __init__(self):
+        self.closes = 0
+
+    async def close(self):
+        self.closes += 1
+
+
+def _manager(attempt, clock, backend=None):
     return SniperManager(
-        backend=None,
+        backend=backend,
         attempt_registration=attempt,
         clock=clock.now,
         sleep=clock.sleep,
@@ -130,3 +141,98 @@ async def test_stop_job_cancels():
     except asyncio.CancelledError:
         pass
     assert job.status is SniperStatus.STOPPED
+
+
+# --- error resilience --------------------------------------------------------
+
+
+async def test_transient_error_recovers_and_resets_browser():
+    """A LoginError mid-job (e.g. expired session, dead page) must not kill the
+    job: the browser is reset and the next attempt succeeds."""
+    clock = FakeClock()
+    backend = FakeBackend()
+    calls = {"n": 0}
+
+    async def attempt(_items):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise LoginError("session dropped mid-grab")
+        return True
+
+    mgr = _manager(attempt, clock, backend=backend)
+    job = mgr.start_open_time(ITEMS, open_time_epoch=clock.t, retry_interval=3.0)
+    await job._task
+    assert job.status is SniperStatus.SUCCEEDED
+    assert job.attempts == 2
+    assert backend.closes == 1  # browser was reset after the error
+    assert job.consecutive_errors == 0  # success cleared the streak
+
+
+async def test_credentials_error_is_fatal():
+    clock = FakeClock()
+
+    async def attempt(_items):
+        raise CredentialsError("password rejected")
+
+    mgr = _manager(attempt, clock)
+    job = mgr.start_open_time(ITEMS, open_time_epoch=clock.t, retry_interval=3.0)
+    await job._task
+    assert job.status is SniperStatus.FAILED
+    assert job.attempts == 1  # no pointless retries with a bad password
+    assert "password rejected" in job.detail
+
+
+async def test_repeated_errors_escalate_to_failed():
+    clock = FakeClock()
+
+    async def attempt(_items):
+        raise LoginError("portal down")
+
+    mgr = _manager(attempt, clock, backend=FakeBackend())
+    job = mgr.start_watch_vacancy(ITEMS, watch_interval=60)
+    await job._task
+    assert job.status is SniperStatus.FAILED
+    assert job.attempts == MAX_CONSECUTIVE_ERRORS
+    assert "consecutive errors" in job.detail
+
+
+async def test_open_time_falls_back_to_watch_vacancy():
+    """then_watch=True: an unsuccessful open window continues as vacancy
+    watching instead of timing out, and still grabs when a seat opens."""
+    clock = FakeClock()
+    calls = {"n": 0}
+
+    async def attempt(_items):
+        calls["n"] += 1
+        return calls["n"] >= 8  # full through the open window, opens later
+
+    mgr = _manager(attempt, clock)
+    job = mgr.start_open_time(
+        ITEMS,
+        open_time_epoch=clock.t,
+        retry_interval=3.0,
+        total_duration=12.0,  # at most ~5 attempts inside the window
+        then_watch=True,
+        watch_interval=60,
+    )
+    await job._task
+    assert job.status is SniperStatus.SUCCEEDED
+    assert job.attempts == 8
+    assert any("falling back" in line for line in job.log)
+
+
+def test_then_watch_validates_watch_interval():
+    clock = FakeClock()
+
+    async def attempt(_items):
+        return False
+
+    mgr = _manager(attempt, clock)
+    with pytest.raises(FrequencyError):
+        mgr.start_open_time(
+            ITEMS,
+            open_time_epoch=clock.t,
+            retry_interval=3.0,
+            then_watch=True,
+            watch_interval=5,  # below the 60s floor
+        )
