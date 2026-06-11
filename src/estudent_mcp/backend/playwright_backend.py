@@ -74,6 +74,12 @@ SEL_SEARCH_FIRST_CODE = "a[id$=':0:subjCode']"
 
 DEFAULT_ORIGIN = "https://www38.polyu.edu.hk"
 
+# Navigation budgets (ms). Fast mode is enabled by the sniper during a grab
+# window: when the portal is down, a probe should cost ~12s, not a 45s wait —
+# what wins the course is how soon the first attempt lands after recovery.
+NAV_TIMEOUT_DEFAULT_MS = 45000
+NAV_TIMEOUT_FAST_MS = 12000
+
 import re as _re
 
 # A subject code is letters optionally followed by digits, e.g. "COMP", "COMP1011".
@@ -92,6 +98,10 @@ class PlaywrightBackend(EStudentBackend):
         self._context = None
         self._page = None
         self._origin = DEFAULT_ORIGIN
+        self._nav_timeout_ms = NAV_TIMEOUT_DEFAULT_MS
+
+    def set_fast_fail(self, enabled: bool) -> None:
+        self._nav_timeout_ms = NAV_TIMEOUT_FAST_MS if enabled else NAV_TIMEOUT_DEFAULT_MS
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -173,21 +183,22 @@ class PlaywrightBackend(EStudentBackend):
                 "ESTUDENT_NETID and ESTUDENT_PASSWORD."
             )
 
+        nav = self._nav_timeout_ms
         try:
             await self._page.goto(
-                ESTUDENT_LANDING, wait_until="domcontentloaded", timeout=45000
+                ESTUDENT_LANDING, wait_until="domcontentloaded", timeout=nav
             )
             await self._page.wait_for_timeout(1000)
             # Landing -> ADFS SSO.
             async with self._page.expect_navigation(
-                wait_until="domcontentloaded", timeout=30000
+                wait_until="domcontentloaded", timeout=min(30000, nav)
             ):
                 await self._page.click(SEL_LANDING_LOGIN)
             # Fill ADFS credentials.
             await self._page.fill(SEL_NETID, self._cfg.netid)
             await self._page.fill(SEL_PASSWORD, self._cfg.password)
             async with self._page.expect_navigation(
-                wait_until="domcontentloaded", timeout=30000
+                wait_until="domcontentloaded", timeout=min(30000, nav)
             ):
                 await self._page.click(SEL_SSO_SUBMIT)
             await self._page.wait_for_timeout(2500)
@@ -217,7 +228,9 @@ class PlaywrightBackend(EStudentBackend):
     async def _try_reuse_session(self) -> bool:
         try:
             await self._page.goto(
-                self._secure_url(PATH_HOME), wait_until="domcontentloaded", timeout=30000
+                self._secure_url(PATH_HOME),
+                wait_until="domcontentloaded",
+                timeout=min(30000, self._nav_timeout_ms),
             )
             await self._page.wait_for_timeout(1200)
         except Exception:

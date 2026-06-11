@@ -17,18 +17,22 @@ from enum import Enum
 from typing import Awaitable, Callable, Optional
 
 from .backend.base import EStudentBackend
-from .errors import CredentialsError, FrequencyError
+from .errors import CredentialsError, FrequencyError, PageStructureError
 from .models import RegistrationItem
 
 # --- Frequency safety bounds (seconds) -------------------------------------
 # These are the floor. Configuring below them raises FrequencyError.
 OPEN_TIME_MIN_RETRY_INTERVAL = 3.0      # retries no faster than every 3s
-OPEN_TIME_MAX_TOTAL_DURATION = 120.0    # stop retrying after 2 minutes
-WATCH_VACANCY_MIN_INTERVAL = 60.0       # check vacancy no more than once a minute
+OPEN_TIME_MAX_TOTAL_DURATION = 1800.0   # intense window: at most 30 minutes
+WATCH_VACANCY_MIN_INTERVAL = 30.0       # vacancy patrol no faster than every 30s
 
-# Same transient error this many times in a row => the problem isn't going
-# away on its own (portal redesign, network down); stop burning attempts.
-MAX_CONSECUTIVE_ERRORS = 5
+# Error policy. Launch-day crashes make the portal unreachable for minutes at
+# a time, so unreachability is judged by *how long* it persists, not by a
+# strike count — a count would kill the job right when patience pays off.
+# Structural errors (page redesign) won't fix themselves, so those keep a
+# small strike limit.
+PORTAL_DOWN_GIVE_UP = 1800.0            # unreachable this long (s) => give up
+MAX_CONSECUTIVE_ERRORS = 5              # structural-error strikes => give up
 
 
 class SniperMode(str, Enum):
@@ -88,6 +92,7 @@ class SniperJob:
     then_watch: bool = False
     attempts: int = 0
     consecutive_errors: int = 0
+    unreachable_since: Optional[float] = None
     log: list[str] = field(default_factory=list)
     _task: Optional[asyncio.Task] = field(default=None, repr=False)
 
@@ -99,6 +104,8 @@ class SniperJob:
             "detail": self.detail,
             "then_watch": self.then_watch,
             "attempts": self.attempts,
+            "consecutive_errors": self.consecutive_errors,
+            "unreachable_since_epoch": self.unreachable_since,
             "items": [
                 {"action": i.action, "subject_code": i.subject_code, "section": i.section}
                 for i in self.items
@@ -207,38 +214,66 @@ class SniperManager:
         job._task = asyncio.ensure_future(self._run_watch_vacancy(job))
         return job
 
+    async def _reset_backend(self) -> None:
+        """Close the browser so the next attempt relaunches and re-logs in."""
+        if self._backend is not None:
+            try:
+                await self._backend.close()
+            except Exception:  # noqa: BLE001
+                pass
+
     async def _safe_attempt(self, job: SniperJob) -> bool:
-        """Run one registration attempt; transient failures count as a miss.
+        """Run one registration attempt; failures count as a miss.
 
         A session that expired mid-job heals itself: every attempt begins with
         backend.login(), which re-authenticates automatically. What login()
-        cannot heal is a dead browser/page object, so on any unexpected error
-        we also close the backend — the next attempt relaunches it from
-        scratch (fresh browser, fresh login). Only CredentialsError (wrong
-        password — retrying is pointless) or MAX_CONSECUTIVE_ERRORS identical
-        failures in a row escape to the caller and end the job.
+        cannot heal is a dead browser/page object, so on any error we also
+        close the backend — the next attempt relaunches it from scratch.
+
+        Errors end the job only via three doors:
+        - CredentialsError: password rejected, retrying is pointless.
+        - PageStructureError MAX_CONSECUTIVE_ERRORS times in a row: the portal
+          changed under us; no amount of retrying fixes selectors.
+        - Anything else (timeouts, connection errors, login flow failures) is
+          treated as "portal unreachable" — expected during the launch-day
+          crush — and only gives up after PORTAL_DOWN_GIVE_UP seconds of
+          continuous unreachability.
         """
         try:
             ok = await self._attempt(job.items)
         except (asyncio.CancelledError, CredentialsError):
             raise
-        except Exception as exc:  # noqa: BLE001 - transient: log, reset, retry
+        except PageStructureError as exc:
             job.consecutive_errors += 1
             job.log.append(
-                f"attempt {job.attempts}: {type(exc).__name__}: {exc} "
-                f"({job.consecutive_errors} consecutive)"
+                f"attempt {job.attempts}: page structure: {exc} "
+                f"({job.consecutive_errors} strike(s))"
             )
             if job.consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                 raise RuntimeError(
-                    f"{job.consecutive_errors} consecutive errors, last: {exc}"
+                    f"{job.consecutive_errors} consecutive page-structure "
+                    f"errors — portal layout likely changed. Last: {exc}"
                 ) from exc
-            if self._backend is not None:
-                try:
-                    await self._backend.close()
-                except Exception:  # noqa: BLE001
-                    pass
+            await self._reset_backend()
+            return False
+        except Exception as exc:  # noqa: BLE001 - portal down/overloaded
+            now = self._clock()
+            if job.unreachable_since is None:
+                job.unreachable_since = now
+            down_for = now - job.unreachable_since
+            job.log.append(
+                f"attempt {job.attempts}: portal unreachable for {down_for:.0f}s "
+                f"({type(exc).__name__}: {exc})"
+            )
+            if down_for >= PORTAL_DOWN_GIVE_UP:
+                raise RuntimeError(
+                    f"portal unreachable for {down_for / 60:.0f} minutes "
+                    f"straight, last: {exc}"
+                ) from exc
+            await self._reset_backend()
             return False
         job.consecutive_errors = 0
+        job.unreachable_since = None
         if not ok:
             job.log.append(f"attempt {job.attempts}: no luck")
         return ok
@@ -264,6 +299,11 @@ class SniperManager:
                 job.status = SniperStatus.PENDING
                 job.detail = f"Waiting {wait:.0f}s until open time."
                 await self._sleep(wait)
+
+            # Grab window: fail attempts fast (short page timeouts) so a
+            # crashed portal costs seconds per probe, not a 45s timeout.
+            if self._backend is not None:
+                self._backend.set_fast_fail(True)
 
             job.status = SniperStatus.RUNNING
             deadline = self._clock() + job.total_duration
@@ -298,6 +338,9 @@ class SniperManager:
             job.detail = f"Error: {exc}"
             job.log.append(job.detail)
             await self._notify(f"[sniper {job.job_id}] {job.detail}")
+        finally:
+            if self._backend is not None:
+                self._backend.set_fast_fail(False)
 
     async def _run_watch_vacancy(self, job: SniperJob) -> None:
         try:

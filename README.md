@@ -43,7 +43,7 @@ search subjects, and (work in progress) add/drop & snipe courses.
 - **Two-step registration invariant**, **sniper frequency floors**, the
   sniper's **self-healing retry logic** (auto re-login, browser relaunch,
   open-time → vacancy-watch fallback), and all **parsers** are unit-tested
-  (24 tests).
+  (27 tests).
 
 ### Not finished yet
 
@@ -97,7 +97,7 @@ chmod 600 .env   # restrict to your user
 ### Verify
 
 ```bash
-uv run pytest -q          # 19 tests should pass
+uv run pytest -q          # 27 tests should pass
 ```
 
 ---
@@ -145,17 +145,25 @@ violate the acceptable-use policy, and is unfair to others.
 
 Frequency floors are enforced (sub-floor configs are rejected):
 
-- **open_time** mode: retry ≥ 3s, total window ≤ 2 min.
-- **watch_vacancy** mode: poll ≥ 60s.
+- **open_time** mode: retry ≥ 3s, intense window ≤ 30 min.
+- **watch_vacancy** mode: poll ≥ 30s.
 
-Within those floors, jobs are **self-healing**: every attempt re-checks the
-session (an expired login re-authenticates automatically with your `.env`
-credentials), a crashed browser is closed and relaunched, and transient errors
-(network blips, page hiccups) just count as a missed attempt. Only rejected
-credentials or 5 identical errors in a row end a job early. Pass
-`then_watch=true` to *open_time* so an unsuccessful open window falls through
-to vacancy watching instead of giving up. Terminal events (grabbed / fallback /
-failed) raise a native macOS notification.
+Note the real rate limiter is the attempt itself — each one is a full browser
+flow taking several seconds — so "every 3s" works out to roughly 4–6 attempts
+per minute, comparable to a fast human refreshing.
+
+Within those floors, jobs are **self-healing** and built to survive the
+launch-day crush: during the open window page timeouts shrink to ~12s so a
+crashed portal costs seconds per probe, an expired session re-authenticates
+automatically with your `.env` credentials, and a crashed browser is closed
+and relaunched. Errors are classified: *portal unreachable* (timeouts,
+connection errors — expected while the portal is being hammered) is judged by
+duration and only ends the job after 30 minutes of continuous downtime;
+*page-structure* errors (portal redesign) end it after 5 strikes; rejected
+credentials end it immediately. Pass `then_watch=true` to *open_time* so an
+unsuccessful open window falls through to vacancy watching instead of giving
+up. Terminal events (grabbed / fallback / failed) raise a native macOS
+notification.
 
 Keep your Mac awake while a job runs — e.g. `caffeinate -dims` in a spare
 terminal. Set `ESTUDENT_HEADFUL=1` to watch the browser.
@@ -258,7 +266,7 @@ Personal use. No warranty.
   模式；无学期时自动逐学期尝试；自动翻页收齐全部科目；命中单个科目时下钻详情页返回每个
   教学组的**名额**（识别 `5` 开放 / `(4)` 保留 / `W=.. Top-up vac=..` 候补）。
 - **两步选课确认**、**抢课频率下限**、抢课**自愈重试逻辑**（自动重登、浏览器重启、
-  开抢失败转捡漏）、所有**解析器**均有单测（24 个）。
+  开抢失败转捡漏）、所有**解析器**均有单测（27 个）。
 
 ### 尚未完成
 
@@ -308,7 +316,7 @@ chmod 600 .env   # 仅本人可读写
 ### 验证
 
 ```bash
-uv run pytest -q          # 应有 19 个测试通过
+uv run pytest -q          # 应有 27 个测试通过
 ```
 
 ---
@@ -353,13 +361,18 @@ claude mcp get estudent     # 应显示 ✔ Connected
 
 强制频率下限（低于下限直接拒绝）：
 
-- **open_time** 模式：重试间隔 ≥ 3 秒，总时长 ≤ 2 分钟。
-- **watch_vacancy** 模式：轮询间隔 ≥ 60 秒。
+- **open_time** 模式：重试间隔 ≥ 3 秒，密集抢课窗口 ≤ 30 分钟。
+- **watch_vacancy** 模式：轮询间隔 ≥ 30 秒。
 
-在下限之内，任务具备**自愈能力**：每次尝试都会重新校验会话（登录过期会自动用
-`.env` 凭据重新登录）；浏览器崩溃会关闭重启；网络抖动、页面异常等瞬时错误只算
-一次未抢到。只有密码被拒、或同类错误连续 5 次才会提前终止任务。*open_time*
-模式可传 `then_watch=true`：开抢窗口没抢到时自动转入捡漏轮询而不是放弃。
+注意真正的限速器是尝试本身——每次都是一整套浏览器操作、耗时数秒,所以"每 3 秒
+一次"实际约为每分钟 4~6 次,和一个手快的人不停刷新相当。
+
+在下限之内，任务具备**自愈能力**，专为开抢瞬间系统被挤崩的场景设计：开抢窗口
+内页面超时压缩到约 12 秒（崩溃时每次探测只花几秒而不是干等 45 秒）；登录过期
+自动用 `.env` 凭据重登；浏览器崩溃自动关闭重启。错误分类处理：*门户不可达*
+（超时、连接错误——开抢拥挤期的常态）按持续时长判定，连续宕机 30 分钟才放弃；
+*页面结构错误*（门户改版）连续 5 次终止；密码被拒立即终止。*open_time* 模式可传
+`then_watch=true`：开抢窗口没抢到时自动转入捡漏轮询而不是放弃。
 抢到 / 转捡漏 / 失败等终态会弹出 macOS 系统通知。
 
 任务运行时让 Mac 保持唤醒——可在另一个终端跑 `caffeinate -dims`。

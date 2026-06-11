@@ -201,23 +201,25 @@ async def start_course_sniper(
     mode: str = "watch_vacancy",
     open_time_iso: Optional[str] = None,
     retry_interval_seconds: float = 3.0,
-    total_duration_seconds: float = 120.0,
-    watch_interval_seconds: float = 60.0,
+    total_duration_seconds: float = 1800.0,
+    watch_interval_seconds: float = 30.0,
     then_watch: bool = False,
 ) -> dict:
     """Start an automated course-grab job (restrained; hard frequency floors).
 
     mode="open_time": wait until `open_time_iso` (ISO 8601), then submit, retrying
-    every `retry_interval_seconds` (>=3s) for up to `total_duration_seconds` (<=120s).
-    With `then_watch=true`, an unsuccessful open window falls through to
-    vacancy watching instead of giving up.
-    mode="watch_vacancy": poll every `watch_interval_seconds` (>=60s) until a
+    every `retry_interval_seconds` (>=3s) for up to `total_duration_seconds`
+    (<=30 min). Page timeouts are shortened during the window so a crashed
+    portal costs ~12s per probe. With `then_watch=true`, an unsuccessful open
+    window falls through to vacancy watching instead of giving up.
+    mode="watch_vacancy": poll every `watch_interval_seconds` (>=30s) until a
     vacancy is grabbed. Sub-floor intervals are rejected.
 
-    Jobs self-heal: an expired session re-authenticates automatically, and a
-    crashed browser is relaunched; only rejected credentials or repeated
-    identical errors end a job early. Terminal events raise a macOS
-    notification.
+    Jobs self-heal: an expired session re-authenticates automatically and a
+    crashed browser is relaunched. A job only ends early on rejected
+    credentials, 5 consecutive page-structure errors (portal redesign), or
+    the portal staying unreachable for 30+ minutes straight. Terminal events
+    raise a macOS notification.
     """
     items = [
         RegistrationItem(

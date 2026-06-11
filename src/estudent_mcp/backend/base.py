@@ -24,6 +24,14 @@ from ..models import (
 class EStudentBackend(ABC):
     """Abstract eStudent client. All methods are async."""
 
+    def set_fast_fail(self, enabled: bool) -> None:
+        """Hint that attempts should fail fast (short page timeouts).
+
+        The sniper enables this during a grab window so a crashed/overloaded
+        portal costs seconds per probe instead of a long navigation timeout.
+        Default is a no-op; browser backends shorten their timeouts.
+        """
+
     @abstractmethod
     async def login(self) -> SessionState:
         """Ensure an authenticated session exists, logging in if needed."""
